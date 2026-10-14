@@ -1,0 +1,6 @@
+{
+  "name": "BrAdO IPTV - Lista de Canais Digital",
+  "description": "Acesse a lista definitiva de canais em formato digital M3U. Pagamento único, sem mensalidades, qualidade 4K/FHD e teste grátis imediato.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
