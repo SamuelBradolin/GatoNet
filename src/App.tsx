@@ -9,7 +9,7 @@ import { FreeTrial } from './components/FreeTrial.tsx';
 import { Footer } from './components/Footer.tsx';
 import { AdminPanelModal } from './components/AdminPanelModal.tsx';
 import { TestChannel } from './types/channel.ts';
-import { getStoredChannels, syncChannelsWithBackend } from './utils/channelStorage.ts';
+import { getStoredChannels, syncChannelsWithBackend, syncAllFromDatabase } from './utils/channelStorage.ts';
 import { initInspectProtection } from './utils/disableDevTools.ts';
 
 export default function App() {
@@ -22,11 +22,11 @@ export default function App() {
     // 1. Ativa bloqueio de botão direito e F12/DevTools
     const cleanupProtection = initInspectProtection();
 
-    // 2. Carrega canais locais e sincroniza com o banco do backend
+    // 2. Carrega canais locais e sincroniza canais e banners ativos do banco definitivo da API
     setChannels(getStoredChannels());
-    syncChannelsWithBackend().then((synced) => {
-      if (synced && synced.length > 0) {
-        setChannels(synced);
+    syncAllFromDatabase().then(({ channels: syncedChannels }) => {
+      if (syncedChannels && syncedChannels.length > 0) {
+        setChannels(syncedChannels);
       }
     });
 

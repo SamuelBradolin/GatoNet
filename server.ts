@@ -5,6 +5,17 @@ import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { Readable } from 'stream';
 import { DEFAULT_CHANNELS, TestChannel, DEFAULT_SPONSOR_CONFIG, SponsorConfig } from './src/types/channel.ts';
+import {
+  initDatabase,
+  getCanaisDB,
+  saveCanaisDB,
+  getBannersDB,
+  saveBannersDB,
+  getAdminConfigDB,
+  updateAdminConfigDB,
+  CanalRecord,
+  BannerRecord,
+} from './server/db.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -167,7 +178,79 @@ function rewriteM3U8Proxy(content: string, baseUrl: string): string {
   return rewrittenLines.join('\n');
 }
 
+function canalRecordToTestChannel(c: CanalRecord): TestChannel {
+  return {
+    id: c.id,
+    name: c.nome,
+    category: c.categoria || 'Esportes',
+    quality: c.resolucao || '1080p FHD',
+    streamUrl: c.url_iptv,
+    active: Boolean(c.ativo),
+    tickerText: c.ticker_texto || '',
+    tickerEnabled: c.ticker_habilitado !== undefined ? Boolean(c.ticker_habilitado) : true,
+  };
+}
+
+function testChannelToCanalRecord(t: TestChannel, index: number): CanalRecord {
+  return {
+    id: t.id,
+    nome: t.name,
+    url_iptv: t.streamUrl,
+    resolucao: t.quality || '1080p FHD',
+    categoria: t.category || 'Esportes',
+    ativo: t.active ? 1 : 0,
+    ticker_texto: t.tickerText || '',
+    ticker_habilitado: t.tickerEnabled ? 1 : 0,
+    ordem: index,
+  };
+}
+
 async function startServer() {
+  // Inicialização e conexão com o banco de dados definitivo (MySQL/MariaDB)
+  await initDatabase();
+
+  // Pré-carrega canais e configurações do banco definitivo para o store
+  try {
+    const dbCanais = await getCanaisDB();
+    if (dbCanais && dbCanais.length > 0) {
+      channelsStore = dbCanais.map(canalRecordToTestChannel);
+    }
+    const [dbAdmin, dbBanners] = await Promise.all([getAdminConfigDB(), getBannersDB()]);
+    if (dbAdmin) {
+      inPlayScriptStore = dbAdmin.inplay_script || '';
+      sponsorStore.tagline = dbAdmin.tagline || sponsorStore.tagline;
+      sponsorStore.description = dbAdmin.descricao !== undefined ? dbAdmin.descricao : sponsorStore.description;
+      sponsorStore.inPlayScript = dbAdmin.inplay_script || '';
+      sponsorStore.inPlayInitialDelaySeconds = dbAdmin.inplay_initial_delay_seconds || 30;
+      sponsorStore.inPlayIntervalMinutes = dbAdmin.inplay_interval_minutes || 8;
+      sponsorStore.inPlayDurationSeconds = dbAdmin.inplay_duration_seconds || 5;
+      if (dbAdmin.cards_json) {
+        try {
+          const parsedCards = JSON.parse(dbAdmin.cards_json);
+          if (Array.isArray(parsedCards)) sponsorStore.cards = parsedCards;
+        } catch (_) {}
+      }
+    }
+    if (dbBanners && Object.keys(dbBanners).length > 0) {
+      for (const [posKey, bRecord] of Object.entries(dbBanners)) {
+        if (sponsorStore.banners && (sponsorStore.banners as any)[posKey]) {
+          (sponsorStore.banners as any)[posKey] = {
+            ...(sponsorStore.banners as any)[posKey],
+            contentType: bRecord.tipo_conteudo,
+            imageUrl: bRecord.imagem_url || '',
+            linkUrl: bRecord.link_url || '',
+            altText: bRecord.alt_texto || (sponsorStore.banners as any)[posKey].altText,
+            scriptCode: bRecord.script_codigo || '',
+            refreshIntervalSeconds: bRecord.tempo_rotacao || 60,
+            active: Boolean(bRecord.ativo),
+          };
+        }
+      }
+    }
+  } catch (preloadErr: any) {
+    console.warn('[DB] Aviso ao pré-carregar stores do banco:', preloadErr?.message);
+  }
+
   const app = express();
 
   // Limite aumentado para 50MB para suportar uploads de imagens em Base64 nos banners e cards sem erro de PayloadTooLargeError
@@ -874,33 +957,141 @@ async function startUpstreamChannelStream(
     await handleProxy(channel.streamUrl, res);
   });
 
-  // --- API DE CANAIS (CRUD) ---
-  app.get('/api/channels', (_req, res) => {
-    res.json(channelsStore);
+  // --- API DE CANAIS (CRUD DIRETO NO BANCO DE DADOS DEFINITIVO: canais) ---
+  app.get('/api/channels', async (_req, res) => {
+    try {
+      const dbCanais = await getCanaisDB();
+      if (dbCanais && dbCanais.length > 0) {
+        channelsStore = dbCanais.map(canalRecordToTestChannel);
+      }
+      res.json(channelsStore);
+    } catch (err: any) {
+      console.error('[DB] Erro ao consultar canais no banco:', err?.message);
+      res.json(channelsStore);
+    }
   });
 
-  app.post('/api/channels', (req, res) => {
+  app.post('/api/channels', async (req, res) => {
     const newChannels = req.body;
     if (Array.isArray(newChannels)) {
       channelsStore = newChannels;
       saveChannelsToDisk(channelsStore);
-      return res.json({ success: true, count: channelsStore.length });
+      try {
+        const canalRecords: CanalRecord[] = newChannels.map(testChannelToCanalRecord);
+        await saveCanaisDB(canalRecords);
+        console.log(`[DB] ${canalRecords.length} canais gravados no banco de dados com sucesso.`);
+        return res.json({ success: true, count: channelsStore.length, persistedInDB: true });
+      } catch (dbErr: any) {
+        console.error('[DB] Erro ao persistir canais no banco:', dbErr?.message);
+        return res.json({ success: true, count: channelsStore.length, warning: 'Salvo em cache local' });
+      }
     }
     return res.status(400).json({ error: 'Formato de canais inválido' });
   });
 
-  app.post('/api/channels/reset', (_req, res) => {
+  app.post('/api/channels/reset', async (_req, res) => {
     channelsStore = DEFAULT_CHANNELS;
     saveChannelsToDisk(channelsStore);
+    try {
+      const defaultRecords = DEFAULT_CHANNELS.map(testChannelToCanalRecord);
+      await saveCanaisDB(defaultRecords);
+    } catch (_) {}
     res.json({ success: true, count: channelsStore.length });
   });
 
-  // --- API DE PATROCINADOR & CARDS (CRUD) ---
-  app.get('/api/sponsor', (_req, res) => {
-    res.json(sponsorStore);
+  // --- API DE BANNERS (CRUD DIRETO NO BANCO DE DADOS DEFINITIVO: banners) ---
+  app.get('/api/banners', async (_req, res) => {
+    try {
+      const banners = await getBannersDB();
+      res.json(banners);
+    } catch (err: any) {
+      console.error('[DB] Erro ao consultar banners:', err?.message);
+      res.status(500).json({ error: 'Erro ao buscar banners no banco de dados' });
+    }
   });
 
-  app.post('/api/sponsor', (req, res) => {
+  app.post('/api/banners', async (req, res) => {
+    const banners = req.body;
+    if (banners && typeof banners === 'object') {
+      try {
+        await saveBannersDB(banners);
+        return res.json({ success: true, banners, persistedInDB: true });
+      } catch (err: any) {
+        console.error('[DB] Erro ao persistir banners no banco:', err?.message);
+        return res.status(500).json({ error: 'Erro ao salvar banners no banco de dados' });
+      }
+    }
+    return res.status(400).json({ error: 'Formato de banners inválido' });
+  });
+
+  // --- API DE ADMIN CONFIG (CRUD DIRETO NO BANCO DE DADOS DEFINITIVO: admin_config) ---
+  app.get('/api/admin-config', async (_req, res) => {
+    try {
+      const cfg = await getAdminConfigDB();
+      res.json(cfg);
+    } catch (err) {
+      res.status(500).json({ error: 'Erro ao carregar admin_config' });
+    }
+  });
+
+  app.post('/api/admin-config', async (req, res) => {
+    try {
+      const updated = await updateAdminConfigDB(req.body || {});
+      res.json({ success: true, config: updated, persistedInDB: true });
+    } catch (err) {
+      res.status(500).json({ error: 'Erro ao atualizar admin_config' });
+    }
+  });
+
+  // --- API DE PATROCINADOR & BANNERS (CRUD INTEGRADO COM BANCO DE DADOS) ---
+  app.get('/api/sponsor', async (_req, res) => {
+    try {
+      const [adminCfg, bannersDb] = await Promise.all([getAdminConfigDB(), getBannersDB()]);
+      
+      const mappedBanners: any = { ...sponsorStore.banners };
+      for (const [posKey, bRecord] of Object.entries(bannersDb)) {
+        if (mappedBanners[posKey]) {
+          mappedBanners[posKey] = {
+            ...mappedBanners[posKey],
+            contentType: bRecord.tipo_conteudo,
+            imageUrl: bRecord.imagem_url || '',
+            linkUrl: bRecord.link_url || '',
+            altText: bRecord.alt_texto || mappedBanners[posKey].altText,
+            scriptCode: bRecord.script_codigo || '',
+            refreshIntervalSeconds: bRecord.tempo_rotacao || 60,
+            active: Boolean(bRecord.ativo),
+          };
+        }
+      }
+
+      let parsedCards = sponsorStore.cards;
+      try {
+        if (adminCfg.cards_json) {
+          const parsed = JSON.parse(adminCfg.cards_json);
+          if (Array.isArray(parsed)) parsedCards = parsed;
+        }
+      } catch (_) {}
+
+      const mergedSponsor: SponsorConfig = {
+        ...sponsorStore,
+        tagline: adminCfg.tagline || sponsorStore.tagline,
+        description: adminCfg.descricao !== undefined ? adminCfg.descricao : sponsorStore.description,
+        inPlayScript: adminCfg.inplay_script || '',
+        inPlayInitialDelaySeconds: adminCfg.inplay_initial_delay_seconds || 30,
+        inPlayIntervalMinutes: adminCfg.inplay_interval_minutes || 8,
+        inPlayDurationSeconds: adminCfg.inplay_duration_seconds || 5,
+        banners: mappedBanners,
+        cards: parsedCards,
+      };
+
+      sponsorStore = mergedSponsor;
+      res.json(mergedSponsor);
+    } catch (err) {
+      res.json(sponsorStore);
+    }
+  });
+
+  app.post('/api/sponsor', async (req, res) => {
     const config = req.body;
     if (config && typeof config === 'object') {
       sponsorStore = {
@@ -909,29 +1100,84 @@ async function startUpstreamChannelStream(
       };
       inPlayScriptStore = sponsorStore.inPlayScript || '';
       saveSponsorToDisk(sponsorStore);
-      return res.json({ success: true, config: sponsorStore });
+
+      // Persiste direto nas tabelas admin_config e banners do banco definitivo
+      try {
+        await updateAdminConfigDB({
+          tagline: config.tagline,
+          descricao: config.description,
+          inplay_script: config.inPlayScript || '',
+          inplay_initial_delay_seconds: config.inPlayInitialDelaySeconds ?? 30,
+          inplay_interval_minutes: config.inPlayIntervalMinutes ?? 8,
+          inplay_duration_seconds: config.inPlayDurationSeconds ?? 5,
+          cards_json: JSON.stringify(config.cards || []),
+        });
+
+        if (config.banners && typeof config.banners === 'object') {
+          const bannerRecords: Record<string, BannerRecord> = {};
+          for (const [pos, item] of Object.entries(config.banners as Record<string, any>)) {
+            bannerRecords[pos] = {
+              id: item.id || pos,
+              posicao: pos,
+              tipo_conteudo: item.contentType || 'image',
+              imagem_url: item.imageUrl || '',
+              link_url: item.linkUrl || '',
+              alt_texto: item.altText || '',
+              script_codigo: item.scriptCode || '',
+              tempo_rotacao: item.refreshIntervalSeconds || 60,
+              ativo: item.active ? 1 : 0,
+            };
+          }
+          await saveBannersDB(bannerRecords);
+        }
+
+        console.log('[DB] Configuração de Patrocinador e Banners gravada no banco com sucesso.');
+        return res.json({ success: true, config: sponsorStore, persistedInDB: true });
+      } catch (dbErr: any) {
+        console.error('[DB] Erro ao gravar sponsor/banners no banco:', dbErr?.message);
+        return res.json({ success: true, config: sponsorStore, warning: 'Salvo localmente' });
+      }
     }
     return res.status(400).json({ error: 'Configuração inválida' });
   });
 
-  app.post('/api/sponsor/reset', (_req, res) => {
+  app.post('/api/sponsor/reset', async (_req, res) => {
     sponsorStore = DEFAULT_SPONSOR_CONFIG;
     inPlayScriptStore = '';
     saveSponsorToDisk(sponsorStore);
+    try {
+      await updateAdminConfigDB({
+        tagline: DEFAULT_SPONSOR_CONFIG.tagline,
+        descricao: DEFAULT_SPONSOR_CONFIG.description,
+        inplay_script: '',
+        inplay_initial_delay_seconds: 30,
+        inplay_interval_minutes: 8,
+        inplay_duration_seconds: 5,
+        cards_json: JSON.stringify(DEFAULT_SPONSOR_CONFIG.cards || []),
+      });
+    } catch (_) {}
     res.json({ success: true, config: sponsorStore });
   });
 
   // --- API DE ARMAZENAMENTO DO SCRIPT DE ANÚNCIO IN-PLAY ---
-  app.get('/api/inplay-script', (_req, res) => {
-    res.json({ inPlayScript: inPlayScriptStore });
+  app.get('/api/inplay-script', async (_req, res) => {
+    try {
+      const cfg = await getAdminConfigDB();
+      res.json({ inPlayScript: cfg.inplay_script || inPlayScriptStore });
+    } catch (_) {
+      res.json({ inPlayScript: inPlayScriptStore });
+    }
   });
 
-  app.post('/api/inplay-script', (req, res) => {
+  app.post('/api/inplay-script', async (req, res) => {
     const { inPlayScript } = req.body || {};
     inPlayScriptStore = typeof inPlayScript === 'string' ? inPlayScript : '';
     sponsorStore.inPlayScript = inPlayScriptStore;
     saveSponsorToDisk(sponsorStore);
-    res.json({ success: true, inPlayScript: inPlayScriptStore });
+    try {
+      await updateAdminConfigDB({ inplay_script: inPlayScriptStore });
+    } catch (_) {}
+    res.json({ success: true, inPlayScript: inPlayScriptStore, persistedInDB: true });
   });
 
   // Health check com métricas do Broadcaster

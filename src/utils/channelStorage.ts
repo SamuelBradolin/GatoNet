@@ -40,22 +40,22 @@ export const getStoredChannels = (): TestChannel[] => {
  * Salva os canais no localStorage e envia para o backend (/api/channels)
  * para que o proxy do servidor saiba as URLs reais mapeadas aos IDs.
  */
-export const saveStoredChannels = (channels: TestChannel[]): void => {
-  if (typeof window === 'undefined') return;
+export const saveStoredChannels = async (channels: TestChannel[]): Promise<boolean> => {
+  if (typeof window === 'undefined') return false;
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(channels));
     window.dispatchEvent(new Event('brado_channels_updated'));
 
-    // Sincroniza com o backend do servidor em segundo plano
-    fetch('/api/channels', {
+    // Sincroniza com o backend do servidor (persistindo no banco de dados MySQL/MariaDB)
+    const res = await fetch('/api/channels', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(channels),
-    }).catch((err) => {
-      console.warn('Aviso: Backend offline para sync de canais:', err?.message);
     });
+    return res.ok;
   } catch (err) {
-    console.error('Erro ao salvar canais:', err);
+    console.error('Erro ao salvar canais no banco de dados:', err);
+    return false;
   }
 };
 
@@ -221,19 +221,21 @@ export const saveStoredInPlayScript = (script: string): void => {
   saveStoredSponsorConfig(current);
 };
 
-export const saveStoredSponsorConfig = (config: SponsorConfig): void => {
-  if (typeof window === 'undefined') return;
+export const saveStoredSponsorConfig = async (config: SponsorConfig): Promise<boolean> => {
+  if (typeof window === 'undefined') return false;
   try {
     localStorage.setItem(SPONSOR_STORAGE_KEY, JSON.stringify(config));
     window.dispatchEvent(new Event('brado_sponsor_updated'));
 
-    fetch('/api/sponsor', {
+    const res = await fetch('/api/sponsor', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(config),
-    }).catch(() => {});
+    });
+    return res.ok;
   } catch (err) {
-    console.error('Erro ao salvar sponsor config:', err);
+    console.error('Erro ao salvar sponsor config no banco de dados:', err);
+    return false;
   }
 };
 
@@ -260,4 +262,24 @@ export const syncSponsorWithBackend = async (): Promise<SponsorConfig> => {
     }
   } catch {}
   return getStoredSponsorConfig();
+};
+
+/**
+ * Consulta a API do backend na inicialização da aplicação para carregar
+ * os canais e banners ativos diretamente do banco de dados definitivo.
+ */
+export const syncAllFromDatabase = async (): Promise<{ channels: TestChannel[]; sponsor: SponsorConfig }> => {
+  try {
+    const [channels, sponsor] = await Promise.all([
+      syncChannelsWithBackend(),
+      syncSponsorWithBackend(),
+    ]);
+    return { channels, sponsor };
+  } catch (err) {
+    console.warn('[DB] Fallback para storage local na inicialização:', err);
+    return {
+      channels: getStoredChannels(),
+      sponsor: getStoredSponsorConfig(),
+    };
+  }
 };

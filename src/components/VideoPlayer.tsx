@@ -16,7 +16,7 @@ import {
 } from 'lucide-react';
 import { TestChannel } from '../types/channel.ts';
 import { getProxiedStreamUrl } from '../utils/proxyStream.ts';
-import { getStoredSponsorConfig, getStoredChannels } from '../utils/channelStorage.ts';
+import { getStoredSponsorConfig, getStoredChannels, syncSponsorWithBackend } from '../utils/channelStorage.ts';
 import { castManager, CastDeviceState } from '../utils/castManager.ts';
 
 // Imagem cinza de teste (Placeholder) temporária em formato SVG Data URI
@@ -461,6 +461,19 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
   // Ouve atualizações de patrocinador e temporizadores do Painel Admin em tempo real
   useEffect(() => {
+    // Sincroniza banners e configurações ativas diretamente do banco de dados da API ao inicializar
+    syncSponsorWithBackend().then((cfg) => {
+      if (cfg) {
+        setInPlayScript(cfg.inPlayScript || '');
+        setInPlayConfig({
+          script: cfg.inPlayScript || '',
+          initialDelaySeconds: cfg.inPlayInitialDelaySeconds ?? 30,
+          intervalMinutes: cfg.inPlayIntervalMinutes ?? 8,
+          durationSeconds: cfg.inPlayDurationSeconds ?? 5,
+        });
+      }
+    });
+
     const handleSponsorUpdate = () => {
       const cfg = getStoredSponsorConfig();
       setInPlayScript(cfg.inPlayScript || '');

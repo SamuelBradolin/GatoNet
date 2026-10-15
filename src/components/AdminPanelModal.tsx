@@ -53,7 +53,9 @@ import {
   saveStoredSponsorConfig,
   resetStoredSponsorConfig,
   getAdminPin, 
-  setAdminPin 
+  setAdminPin,
+  syncChannelsWithBackend,
+  syncSponsorWithBackend
 } from '../utils/channelStorage.ts';
 
 interface AdminPanelModalProps {
@@ -76,6 +78,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
   const [sponsorConfig, setSponsorConfig] = useState<SponsorConfig>(DEFAULT_SPONSOR_CONFIG);
   const [selectedBannerPosition, setSelectedBannerPosition] = useState<BannerPositionId>('top_player');
   const [saveSuccess, setSaveSuccess] = useState(false);
+  const [isSavingDB, setIsSavingDB] = useState(false);
   const [activeTab, setActiveTab] = useState<'channels' | 'sponsor' | 'audience' | 'settings'>('channels');
   
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -145,11 +148,17 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
     return () => clearInterval(interval);
   }, [isAuthenticated, isOpen]);
 
-  // Load channels and sponsor config whenever modal opens
+  // Load channels and sponsor config whenever modal opens directly from database API
   useEffect(() => {
     if (isOpen) {
       setChannels(getStoredChannels());
       setSponsorConfig(getStoredSponsorConfig());
+      syncChannelsWithBackend().then((data) => {
+        if (data && data.length > 0) setChannels(data);
+      });
+      syncSponsorWithBackend().then((data) => {
+        if (data) setSponsorConfig(data);
+      });
       setSaveSuccess(false);
       setLoginError(false);
     }
@@ -364,11 +373,20 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
     }));
   };
 
-  const handleSaveAll = () => {
-    saveStoredChannels(channels);
-    saveStoredSponsorConfig(sponsorConfig);
-    setSaveSuccess(true);
-    setTimeout(() => setSaveSuccess(false), 3000);
+  const handleSaveAll = async () => {
+    setIsSavingDB(true);
+    try {
+      await Promise.all([
+        saveStoredChannels(channels),
+        saveStoredSponsorConfig(sponsorConfig),
+      ]);
+      setSaveSuccess(true);
+    } catch (err) {
+      console.error('Erro ao persistir no banco de dados:', err);
+    } finally {
+      setIsSavingDB(false);
+      setTimeout(() => setSaveSuccess(false), 3500);
+    }
   };
 
   const handleResetDefaults = () => {
@@ -1820,14 +1838,21 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
         {/* Admin Footer */}
         {isAuthenticated && (
           <div className="border-t border-zinc-800/80 px-6 py-4 bg-zinc-900/50 flex items-center justify-between gap-4 shrink-0">
-            <span className="text-xs text-zinc-500 flex items-center gap-1.5">
-              <Sparkles className="w-3.5 h-3.5 text-purple-400" />
+            <span className="text-xs text-zinc-400 flex items-center gap-1.5">
+              <Sparkles className="w-3.5 h-3.5 text-purple-400 shrink-0" />
               {activeTab === 'audience'
                 ? 'Os números de audiência são atualizados automaticamente a cada 5 minutos.'
-                : 'As alterações são salvas localmente no navegador e refletem em tempo real.'}
+                : 'As alterações são gravadas diretamente no banco de dados e sincronizadas no player em tempo real.'}
             </span>
 
             <div className="flex items-center gap-2">
+              {saveSuccess && (
+                <span className="text-xs font-bold text-emerald-400 flex items-center gap-1 animate-in fade-in">
+                  <Check className="w-3.5 h-3.5" />
+                  Salvo no Banco!
+                </span>
+              )}
+
               {activeTab === 'audience' ? (
                 <button
                   type="button"
@@ -1841,10 +1866,25 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
               ) : (
                 <button
                   onClick={handleSaveAll}
-                  className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white text-xs font-bold transition-all flex items-center gap-2 shadow-md shadow-purple-600/25"
+                  disabled={isSavingDB}
+                  className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white text-xs font-bold transition-all flex items-center gap-2 shadow-md shadow-purple-600/25 disabled:opacity-60"
                 >
-                  <Save className="w-3.5 h-3.5" />
-                  Salvar Alterações
+                  {isSavingDB ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      <span>Gravando no Banco...</span>
+                    </>
+                  ) : saveSuccess ? (
+                    <>
+                      <Check className="w-3.5 h-3.5 text-emerald-300" />
+                      <span>Salvo com Sucesso!</span>
+                    </>
+                  ) : (
+                    <>
+                      <Save className="w-3.5 h-3.5" />
+                      <span>Salvar no Banco de Dados</span>
+                    </>
+                  )}
                 </button>
               )}
             </div>
