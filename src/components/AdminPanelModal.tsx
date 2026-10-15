@@ -78,6 +78,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
   const [sponsorConfig, setSponsorConfig] = useState<SponsorConfig>(DEFAULT_SPONSOR_CONFIG);
   const [selectedBannerPosition, setSelectedBannerPosition] = useState<BannerPositionId>('top_player');
   const [saveSuccess, setSaveSuccess] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [isSavingDB, setIsSavingDB] = useState(false);
   const [activeTab, setActiveTab] = useState<'channels' | 'sponsor' | 'audience' | 'settings'>('channels');
   
@@ -375,17 +376,20 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
 
   const handleSaveAll = async () => {
     setIsSavingDB(true);
+    setSaveError(null);
+    setSaveSuccess(false);
     try {
       await Promise.all([
         saveStoredChannels(channels),
         saveStoredSponsorConfig(sponsorConfig),
       ]);
       setSaveSuccess(true);
-    } catch (err) {
+      setTimeout(() => setSaveSuccess(false), 4000);
+    } catch (err: any) {
       console.error('Erro ao persistir no banco de dados:', err);
+      setSaveError(err?.message || 'Falha ao salvar dados no banco MySQL.');
     } finally {
       setIsSavingDB(false);
-      setTimeout(() => setSaveSuccess(false), 3500);
     }
   };
 
@@ -1837,21 +1841,40 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
 
         {/* Admin Footer */}
         {isAuthenticated && (
-          <div className="border-t border-zinc-800/80 px-6 py-4 bg-zinc-900/50 flex items-center justify-between gap-4 shrink-0">
-            <span className="text-xs text-zinc-400 flex items-center gap-1.5">
-              <Sparkles className="w-3.5 h-3.5 text-purple-400 shrink-0" />
-              {activeTab === 'audience'
-                ? 'Os números de audiência são atualizados automaticamente a cada 5 minutos.'
-                : 'As alterações são gravadas diretamente no banco de dados e sincronizadas no player em tempo real.'}
-            </span>
+          <div className="border-t border-zinc-800/80 px-6 py-4 bg-zinc-900/50 flex flex-col gap-2 shrink-0">
+            {saveError && (
+              <div className="w-full bg-red-950/80 border border-red-500/50 text-red-200 px-3.5 py-2.5 rounded-xl text-xs flex items-start gap-2.5 animate-in fade-in">
+                <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                <div className="flex-1">
+                  <span className="font-bold text-red-300">Falha ao gravar no Banco de Dados MySQL: </span>
+                  <span className="text-red-200">{saveError}</span>
+                  <p className="mt-1 text-[11px] text-red-400">Verifique os logs detalhados do servidor no terminal da sua VPS (console.error).</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setSaveError(null)}
+                  className="text-red-400 hover:text-red-200 font-bold ml-1 text-xs"
+                >
+                  ✕
+                </button>
+              </div>
+            )}
 
-            <div className="flex items-center gap-2">
-              {saveSuccess && (
-                <span className="text-xs font-bold text-emerald-400 flex items-center gap-1 animate-in fade-in">
-                  <Check className="w-3.5 h-3.5" />
-                  Salvo no Banco!
-                </span>
-              )}
+            <div className="flex items-center justify-between gap-4">
+              <span className="text-xs text-zinc-400 flex items-center gap-1.5">
+                <Sparkles className="w-3.5 h-3.5 text-purple-400 shrink-0" />
+                {activeTab === 'audience'
+                  ? 'Os números de audiência são atualizados automaticamente a cada 5 minutos.'
+                  : 'As alterações são gravadas diretamente no banco de dados e sincronizadas no player em tempo real.'}
+              </span>
+
+              <div className="flex items-center gap-2">
+                {saveSuccess && (
+                  <span className="text-xs font-bold text-emerald-400 flex items-center gap-1 animate-in fade-in">
+                    <Check className="w-3.5 h-3.5" />
+                    Salvo no Banco!
+                  </span>
+                )}
 
               {activeTab === 'audience' ? (
                 <button
@@ -1889,8 +1912,9 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
               )}
             </div>
           </div>
-        )}
-      </div>
+        </div>
+      )}
     </div>
-  );
+  </div>
+);
 };

@@ -1,0 +1,12 @@
+[
+  {
+    "id": "test-1",
+    "name": "Teste Canal",
+    "category": "Esportes",
+    "quality": "1080p FHD",
+    "streamUrl": "http://test.m3u8",
+    "active": true,
+    "tickerText": "test",
+    "tickerEnabled": true
+  }
+]

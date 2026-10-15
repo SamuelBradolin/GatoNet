@@ -1,0 +1,87 @@
+{
+  "canais": [
+    {
+      "id": "test-1",
+      "nome": "Teste Canal",
+      "url_iptv": "http://test.m3u8",
+      "resolucao": "1080p FHD",
+      "categoria": "Esportes",
+      "ativo": 1,
+      "ticker_texto": "test",
+      "ticker_habilitado": 1,
+      "ordem": 0
+    }
+  ],
+  "banners": {
+    "top_player": {
+      "id": "top_player",
+      "posicao": "top_player",
+      "tipo_conteudo": "image",
+      "imagem_url": "",
+      "link_url": "",
+      "alt_texto": "Banner Topo do Player",
+      "script_codigo": "",
+      "tempo_rotacao": 60,
+      "ativo": 1
+    },
+    "header_beside_logo": {
+      "id": "header_beside_logo",
+      "posicao": "header_beside_logo",
+      "tipo_conteudo": "image",
+      "imagem_url": "",
+      "link_url": "",
+      "alt_texto": "Banner Cabeçalho",
+      "script_codigo": "",
+      "tempo_rotacao": 60,
+      "ativo": 0
+    },
+    "below_player": {
+      "id": "below_player",
+      "posicao": "below_player",
+      "tipo_conteudo": "image",
+      "imagem_url": "",
+      "link_url": "",
+      "alt_texto": "Banner Abaixo do Player",
+      "script_codigo": "",
+      "tempo_rotacao": 60,
+      "ativo": 0
+    },
+    "above_channels": {
+      "id": "above_channels",
+      "posicao": "above_channels",
+      "tipo_conteudo": "image",
+      "imagem_url": "",
+      "link_url": "",
+      "alt_texto": "Banner Acima dos Jogos",
+      "script_codigo": "",
+      "tempo_rotacao": 60,
+      "ativo": 0
+    },
+    "below_channels": {
+      "id": "below_channels",
+      "posicao": "below_channels",
+      "tipo_conteudo": "image",
+      "imagem_url": "",
+      "link_url": "",
+      "alt_texto": "Banner Abaixo dos Jogos",
+      "script_codigo": "",
+      "tempo_rotacao": 60,
+      "ativo": 0
+    }
+  },
+  "admin_config": {
+    "id": 1,
+    "total_usuarios_online": 1,
+    "chave_pix": "pix@gatonet.live",
+    "status_captcha": "ativo",
+    "usuario": "Samuel",
+    "senha_hash": "Mais@0917",
+    "tagline": "Minha Tagline",
+    "descricao": "Minha Descricao",
+    "inplay_script": "",
+    "inplay_initial_delay_seconds": 30,
+    "inplay_interval_minutes": 8,
+    "inplay_duration_seconds": 5,
+    "cards_json": "[]"
+  }
+}

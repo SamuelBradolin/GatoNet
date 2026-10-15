@@ -42,21 +42,25 @@ export const getStoredChannels = (): TestChannel[] => {
  */
 export const saveStoredChannels = async (channels: TestChannel[]): Promise<boolean> => {
   if (typeof window === 'undefined') return false;
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(channels));
-    window.dispatchEvent(new Event('brado_channels_updated'));
+  
+  // Sincroniza com o backend do servidor (persistindo no banco de dados MySQL/MariaDB)
+  const res = await fetch('/api/channels', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(channels),
+  });
 
-    // Sincroniza com o backend do servidor (persistindo no banco de dados MySQL/MariaDB)
-    const res = await fetch('/api/channels', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(channels),
-    });
-    return res.ok;
-  } catch (err) {
-    console.error('Erro ao salvar canais no banco de dados:', err);
-    return false;
+  if (!res.ok) {
+    const errData = await res.json().catch(() => ({}));
+    const errMsg = errData.details || errData.error || `Erro HTTP ${res.status} ao gravar canais`;
+    console.error('❌ Falha ao salvar canais no banco de dados:', errMsg);
+    throw new Error(errMsg);
   }
+
+  // Apenas grava no localStorage local se a gravação no banco de dados foi 100% bem-sucedida
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(channels));
+  window.dispatchEvent(new Event('brado_channels_updated'));
+  return true;
 };
 
 export const resetStoredChannels = (): TestChannel[] => {
@@ -223,20 +227,24 @@ export const saveStoredInPlayScript = (script: string): void => {
 
 export const saveStoredSponsorConfig = async (config: SponsorConfig): Promise<boolean> => {
   if (typeof window === 'undefined') return false;
-  try {
-    localStorage.setItem(SPONSOR_STORAGE_KEY, JSON.stringify(config));
-    window.dispatchEvent(new Event('brado_sponsor_updated'));
 
-    const res = await fetch('/api/sponsor', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(config),
-    });
-    return res.ok;
-  } catch (err) {
-    console.error('Erro ao salvar sponsor config no banco de dados:', err);
-    return false;
+  const res = await fetch('/api/sponsor', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(config),
+  });
+
+  if (!res.ok) {
+    const errData = await res.json().catch(() => ({}));
+    const errMsg = errData.details || errData.error || `Erro HTTP ${res.status} ao gravar banners/patrocinador`;
+    console.error('❌ Falha ao salvar patrocinador no banco de dados:', errMsg);
+    throw new Error(errMsg);
   }
+
+  // Apenas grava no localStorage local se a gravação no banco de dados foi 100% bem-sucedida
+  localStorage.setItem(SPONSOR_STORAGE_KEY, JSON.stringify(config));
+  window.dispatchEvent(new Event('brado_sponsor_updated'));
+  return true;
 };
 
 export const resetStoredSponsorConfig = (): SponsorConfig => {

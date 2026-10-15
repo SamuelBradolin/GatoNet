@@ -48,10 +48,26 @@ const BACKUP_DB_FILE = path.join(DATA_DIR, 'gatonet_db.json');
 // Estado em memória e fallback persistente para alta disponibilidade
 let mysqlPool: mysql.Pool | null = null;
 let isUsingMySQL = false;
+let lastConnectionError: {
+  message: string;
+  code?: string;
+  errno?: number;
+  sqlState?: string;
+  sqlMessage?: string;
+  stack?: string;
+  timestamp: string;
+} | null = null;
 
-// Garante que o diretório data exista
-if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
+export function getDbConnectionStatus() {
+  return {
+    isConfigured: Boolean(process.env.MYSQL_HOST && process.env.MYSQL_USER),
+    isUsingMySQL,
+    host: process.env.MYSQL_HOST || null,
+    port: parseInt(process.env.MYSQL_PORT || '3306', 10),
+    user: process.env.MYSQL_USER || null,
+    database: process.env.MYSQL_DATABASE || 'gatonet_db',
+    lastError: lastConnectionError,
+  };
 }
 
 // Valores padrão caso o banco esteja vazio
@@ -260,12 +276,22 @@ export async function initDatabase(): Promise<boolean> {
   const port = parseInt(process.env.MYSQL_PORT || '3306', 10);
 
   if (!host || !user) {
-    console.log('[DB] Variáveis MYSQL_HOST/MYSQL_USER não fornecidas. Operando com armazenamento persistente.');
+    console.warn('\n================================================================================');
+    console.warn('⚠️  [DB AVISO] Variáveis MYSQL_HOST ou MYSQL_USER não encontradas no arquivo .env');
+    console.warn('================================================================================');
+    console.warn('Para salvar os canais e banners permanentemente no MySQL da sua VPS, certifique-se');
+    console.warn('de que o arquivo .env contenha:');
+    console.warn('  MYSQL_HOST=127.0.0.1');
+    console.warn('  MYSQL_PORT=3306');
+    console.warn('  MYSQL_USER=seu_usuario');
+    console.warn('  MYSQL_PASSWORD=sua_senha');
+    console.warn('  MYSQL_DATABASE=gatonet_db');
+    console.warn('Operando temporariamente em modo de persistência local.\n');
     return false;
   }
 
   try {
-    console.log(`[DB] Conectando ao MySQL em ${host}:${port} (banco: ${database})...`);
+    console.log(`[DB] Conectando ao MySQL em ${host}:${port} (banco: ${database}, usuário: ${user})...`);
     mysqlPool = mysql.createPool({
       host,
       port,
@@ -275,12 +301,15 @@ export async function initDatabase(): Promise<boolean> {
       waitForConnections: true,
       connectionLimit: 10,
       queueLimit: 0,
-      connectTimeout: 4000,
+      connectTimeout: 10000,
     });
 
     const conn = await mysqlPool.getConnection();
-    console.log('✅ [DB] Conexão com o banco de dados MySQL/MariaDB estabelecida com sucesso!');
+    console.log('\n================================================================================');
+    console.log(`✅ [DB SUCESSO] Conexão com o banco MySQL '${database}' estabelecida em ${host}:${port}!`);
+    console.log('================================================================================\n');
     isUsingMySQL = true;
+    lastConnectionError = null;
 
     // 1. Criar tabela canais
     await conn.query(`
@@ -352,7 +381,7 @@ export async function initDatabase(): Promise<boolean> {
       }
     }
 
-    const [bannerCount]: any = await conn.query('SELECT COUNT(*) as count FROM \`banners\`');
+    const [bannerCount]: any = await conn.query('SELECT COUNT(*) as count FROM `banners`');
     if (bannerCount && bannerCount[0]?.count === 0) {
       console.log('[DB] Populando tabela banners com dados iniciais...');
       for (const b of Object.values(localState.banners)) {
@@ -364,7 +393,7 @@ export async function initDatabase(): Promise<boolean> {
       }
     }
 
-    const [adminCount]: any = await conn.query('SELECT COUNT(*) as count FROM \`admin_config\`');
+    const [adminCount]: any = await conn.query('SELECT COUNT(*) as count FROM `admin_config`');
     if (adminCount && adminCount[0]?.count === 0) {
       console.log('[DB] Populando tabela admin_config com dados iniciais...');
       const cfg = localState.admin_config;
@@ -392,8 +421,57 @@ export async function initDatabase(): Promise<boolean> {
     conn.release();
     return true;
   } catch (err: any) {
-    console.warn(`[DB] Não foi possível conectar ao servidor MySQL (${err.message}). Operando em modo armazenamento persistente.`);
     isUsingMySQL = false;
+    lastConnectionError = {
+      message: err.message || 'Erro desconhecido ao conectar ao MySQL',
+      code: err.code,
+      errno: err.errno,
+      sqlState: err.sqlState,
+      sqlMessage: err.sqlMessage,
+      stack: err.stack,
+      timestamp: new Date().toISOString(),
+    };
+
+    console.error('\n================================================================================');
+    console.error('❌ [DB CRÍTICO] FALHA AO CONECTAR COM O BANCO DE DADOS MYSQL NO SERVIDOR:');
+    console.error('================================================================================');
+    console.error(`- Host configurado:    ${host}:${port}`);
+    console.error(`- Usuário MySQL:       ${user}`);
+    console.error(`- Banco de Dados:      ${database}`);
+    console.error(`- Senha fornecida:     ${password ? 'SIM (definida no .env)' : 'NÃO (em branco)'}`);
+    console.error(`- Código do Erro:      ${err.code || 'N/A'} (errno: ${err.errno || 'N/A'})`);
+    console.error(`- Mensagem do Erro:    ${err.message}`);
+    if (err.sqlMessage) {
+      console.error(`- Mensagem SQL MySQL:  ${err.sqlMessage}`);
+    }
+    console.error('--------------------------------------------------------------------------------');
+    console.error('🔍 GUIA DE DIAGNÓSTICO E RESOLUÇÃO NO SERVIDOR VPS:');
+    if (err.code === 'ECONNREFUSED') {
+      console.error('  1. O serviço MySQL/MariaDB não está em execução ou não aceita conexões na porta 3306.');
+      console.error('     -> Verifique no terminal da VPS: sudo systemctl status mysql (ou mariadb)');
+      console.error('     -> Se estiver inativo, inicie:  sudo systemctl start mysql');
+      console.error('  2. Se configurou MYSQL_HOST=localhost, altere para MYSQL_HOST=127.0.0.1');
+      console.error('     (Node.js usa socket unix para "localhost", enquanto 127.0.0.1 força TCP na porta 3306)');
+    } else if (err.code === 'ER_ACCESS_DENIED_ERROR' || err.code === 'ER_NOT_SUPPORTED_AUTH_MODE') {
+      console.error('  1. O usuário ou a senha informados no .env foram recusados pelo MySQL.');
+      console.error('  2. Garanta que o usuário tenha permissão total sobre o banco:');
+      console.error(`     mysql -u root -p`);
+      console.error(`     GRANT ALL PRIVILEGES ON \`${database}\`.* TO '${user}'@'localhost' IDENTIFIED BY '${password || 'SUA_SENHA'}';`);
+      console.error(`     GRANT ALL PRIVILEGES ON \`${database}\`.* TO '${user}'@'127.0.0.1' IDENTIFIED BY '${password || 'SUA_SENHA'}';`);
+      console.error('     FLUSH PRIVILEGES;');
+    } else if (err.code === 'ER_BAD_DB_ERROR') {
+      console.error(`  1. O banco de dados '${database}' não existe no MySQL.`);
+      console.error(`     -> Crie o banco executando no terminal MySQL:`);
+      console.error(`     CREATE DATABASE \`${database}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;`);
+    } else if (err.code === 'ETIMEDOUT') {
+      console.error('  1. Tempo limite esgotado conectando ao host MySQL.');
+      console.error('  2. Verifique firewall (UFW) ou se a porta 3306 está aberta.');
+    } else {
+      console.error('  1. Verifique as credenciais no arquivo .env.');
+      console.error(`  2. Detalhes técnicos: ${err.stack || err.message}`);
+    }
+    console.error('================================================================================\n');
+
     return false;
   }
 }
@@ -418,8 +496,15 @@ export async function getCanaisDB(onlyActive = false): Promise<CanalRecord[]> {
         ticker_texto: r.ticker_texto || '',
         ticker_habilitado: Boolean(r.ticker_habilitado),
       }));
-    } catch (err) {
-      console.error('[DB] Erro ao buscar canais no MySQL:', err);
+    } catch (err: any) {
+      console.error('\n================================================================================');
+      console.error('❌ [DB CRÍTICO] ERRO AO CONSULTAR CANAIS NO BANCO DE DADOS MYSQL:');
+      console.error('================================================================================');
+      console.error('- Mensagem:', err.message);
+      console.error('- Código:', err.code);
+      console.error('- SQL:', err.sqlMessage || 'N/A');
+      console.error('- Stack:', err.stack);
+      console.error('================================================================================\n');
     }
   }
 
@@ -431,7 +516,83 @@ export async function getCanaisDB(onlyActive = false): Promise<CanalRecord[]> {
 }
 
 export async function saveCanaisDB(canais: CanalRecord[]): Promise<boolean> {
-  // Atualiza localState e arquivo de disco
+  const isEnvConfigured = Boolean(process.env.MYSQL_HOST && process.env.MYSQL_USER);
+
+  // Se o usuário configurou o MySQL no .env mas a conexão não está ativa, rejeita a gravação imediatamente
+  if (isEnvConfigured && (!isUsingMySQL || !mysqlPool)) {
+    const errorMsg = `Conexão MySQL inativa no servidor! O arquivo .env possui credenciais, mas o banco falhou ao conectar (${lastConnectionError?.message || 'Servidor offline'}).`;
+    console.error('\n================================================================================');
+    console.error('❌ [DB CRÍTICO] TENTATIVA DE GRAVAR CANAIS COM BANCO MYSQL DESCONECTADO:');
+    console.error('================================================================================');
+    console.error(errorMsg);
+    console.error('Código do erro de conexão original:', lastConnectionError?.code || 'N/A');
+    console.error('================================================================================\n');
+    throw new Error(errorMsg);
+  }
+
+  // Se o MySQL estiver ativo, executa comandos com TRANSACTION no banco
+  if (isUsingMySQL && mysqlPool) {
+    let conn: mysql.PoolConnection | null = null;
+    try {
+      conn = await mysqlPool.getConnection();
+      await conn.beginTransaction();
+
+      // Limpa e reinsere a lista atualizada para manter a ordem exata
+      await conn.query('DELETE FROM `canais`');
+      for (let i = 0; i < canais.length; i++) {
+        const c = canais[i];
+        await conn.query(
+          `INSERT INTO \`canais\` (\`id\`, \`nome\`, \`url_iptv\`, \`resolucao\`, \`categoria\`, \`ativo\`, \`ticker_texto\`, \`ticker_habilitado\`, \`ordem\`)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON DUPLICATE KEY UPDATE 
+             \`nome\` = VALUES(\`nome\`),
+             \`url_iptv\` = VALUES(\`url_iptv\`),
+             \`resolucao\` = VALUES(\`resolucao\`),
+             \`categoria\` = VALUES(\`categoria\`),
+             \`ativo\` = VALUES(\`ativo\`),
+             \`ticker_texto\` = VALUES(\`ticker_texto\`),
+             \`ticker_habilitado\` = VALUES(\`ticker_habilitado\`),
+             \`ordem\` = VALUES(\`ordem\`)`,
+          [
+            c.id,
+            c.nome,
+            c.url_iptv,
+            c.resolucao || '1080p FHD',
+            c.categoria || 'Geral',
+            c.ativo ? 1 : 0,
+            c.ticker_texto || '',
+            c.ticker_habilitado ? 1 : 0,
+            i,
+          ]
+        );
+      }
+
+      await conn.commit();
+      console.log(`✅ [DB] ${canais.length} canais salvos e comitados com 100% de sucesso no MySQL!`);
+    } catch (err: any) {
+      if (conn) {
+        try {
+          await conn.rollback();
+          console.warn('[DB] Rollback executado na transação de canais após erro.');
+        } catch (rbErr) {
+          console.error('[DB] Erro ao executar rollback de canais:', rbErr);
+        }
+      }
+      console.error('\n================================================================================');
+      console.error('❌ [DB CRÍTICO] ERRO AO GRAVAR CANAIS NO BANCO DE DADOS MYSQL:');
+      console.error('================================================================================');
+      console.error('- Mensagem:', err.message);
+      console.error('- Código:', err.code);
+      console.error('- SQL:', err.sqlMessage || 'N/A');
+      console.error('- Stack:', err.stack);
+      console.error('================================================================================\n');
+      throw err;
+    } finally {
+      if (conn) conn.release();
+    }
+  }
+
+  // Apenas após gravação no MySQL sem erros atualiza o estado local e backup
   localState.canais = canais.map((c, idx) => ({
     ...c,
     ordem: idx,
@@ -439,56 +600,6 @@ export async function saveCanaisDB(canais: CanalRecord[]): Promise<boolean> {
     ticker_habilitado: c.ticker_habilitado !== undefined ? (c.ticker_habilitado ? 1 : 0) : 1,
   }));
   persistLocalBackup();
-
-  // Se o MySQL estiver ativo, executa comandos INSERT / UPDATE diretos no banco
-  if (isUsingMySQL && mysqlPool) {
-    try {
-      const conn = await mysqlPool.getConnection();
-      try {
-        await conn.beginTransaction();
-
-        // Limpa e reinsere a lista atualizada para manter a ordem exata
-        await conn.query('DELETE FROM `canais`');
-        for (let i = 0; i < canais.length; i++) {
-          const c = canais[i];
-          await conn.query(
-            `INSERT INTO \`canais\` (\`id\`, \`nome\`, \`url_iptv\`, \`resolucao\`, \`categoria\`, \`ativo\`, \`ticker_texto\`, \`ticker_habilitado\`, \`ordem\`)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-             ON DUPLICATE KEY UPDATE 
-               \`nome\` = VALUES(\`nome\`),
-               \`url_iptv\` = VALUES(\`url_iptv\`),
-               \`resolucao\` = VALUES(\`resolucao\`),
-               \`categoria\` = VALUES(\`categoria\`),
-               \`ativo\` = VALUES(\`ativo\`),
-               \`ticker_texto\` = VALUES(\`ticker_texto\`),
-               \`ticker_habilitado\` = VALUES(\`ticker_habilitado\`),
-               \`ordem\` = VALUES(\`ordem\`)`,
-            [
-              c.id,
-              c.nome,
-              c.url_iptv,
-              c.resolucao || '1080p FHD',
-              c.categoria || 'Geral',
-              c.ativo ? 1 : 0,
-              c.ticker_texto || '',
-              c.ticker_habilitado ? 1 : 0,
-              i,
-            ]
-          );
-        }
-
-        await conn.commit();
-        console.log(`[DB] ${canais.length} canais salvos com sucesso no MySQL!`);
-      } catch (txErr) {
-        await conn.rollback();
-        throw txErr;
-      } finally {
-        conn.release();
-      }
-    } catch (err) {
-      console.error('[DB] Erro ao sincronizar canais no MySQL:', err);
-    }
-  }
 
   return true;
 }
@@ -517,8 +628,14 @@ export async function getBannersDB(): Promise<Record<string, BannerRecord>> {
         };
       }
       return map;
-    } catch (err) {
-      console.error('[DB] Erro ao buscar banners no MySQL:', err);
+    } catch (err: any) {
+      console.error('\n================================================================================');
+      console.error('❌ [DB CRÍTICO] ERRO AO BUSCAR BANNERS NO BANCO DE DADOS MYSQL:');
+      console.error('================================================================================');
+      console.error('- Mensagem:', err.message);
+      console.error('- Código:', err.code);
+      console.error('- SQL:', err.sqlMessage || 'N/A');
+      console.error('================================================================================\n');
     }
   }
 
@@ -526,13 +643,26 @@ export async function getBannersDB(): Promise<Record<string, BannerRecord>> {
 }
 
 export async function saveBannersDB(banners: Record<string, BannerRecord>): Promise<boolean> {
-  localState.banners = { ...banners };
-  persistLocalBackup();
+  const isEnvConfigured = Boolean(process.env.MYSQL_HOST && process.env.MYSQL_USER);
+
+  if (isEnvConfigured && (!isUsingMySQL || !mysqlPool)) {
+    const errorMsg = `Conexão MySQL inativa no servidor! O arquivo .env possui credenciais, mas o banco falhou ao conectar (${lastConnectionError?.message || 'Servidor offline'}).`;
+    console.error('\n================================================================================');
+    console.error('❌ [DB CRÍTICO] TENTATIVA DE GRAVAR BANNERS COM BANCO MYSQL DESCONECTADO:');
+    console.error('================================================================================');
+    console.error(errorMsg);
+    console.error('================================================================================\n');
+    throw new Error(errorMsg);
+  }
 
   if (isUsingMySQL && mysqlPool) {
+    let conn: mysql.PoolConnection | null = null;
     try {
+      conn = await mysqlPool.getConnection();
+      await conn.beginTransaction();
+
       for (const b of Object.values(banners)) {
-        await mysqlPool.query(
+        await conn.query(
           `INSERT INTO \`banners\` (\`id\`, \`posicao\`, \`tipo_conteudo\`, \`imagem_url\`, \`link_url\`, \`alt_texto\`, \`script_codigo\`, \`tempo_rotacao\`, \`ativo\`)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON DUPLICATE KEY UPDATE
@@ -556,11 +686,33 @@ export async function saveBannersDB(banners: Record<string, BannerRecord>): Prom
           ]
         );
       }
-      console.log('[DB] Banners atualizados com sucesso no MySQL!');
-    } catch (err) {
-      console.error('[DB] Erro ao salvar banners no MySQL:', err);
+
+      await conn.commit();
+      console.log('✅ [DB] Banners gravados e comitados com 100% de sucesso no MySQL!');
+    } catch (err: any) {
+      if (conn) {
+        try {
+          await conn.rollback();
+        } catch (rbErr) {
+          console.error('[DB] Erro ao executar rollback de banners:', rbErr);
+        }
+      }
+      console.error('\n================================================================================');
+      console.error('❌ [DB CRÍTICO] ERRO AO GRAVAR BANNERS NO BANCO DE DADOS MYSQL:');
+      console.error('================================================================================');
+      console.error('- Mensagem:', err.message);
+      console.error('- Código:', err.code);
+      console.error('- SQL:', err.sqlMessage || 'N/A');
+      console.error('- Stack:', err.stack);
+      console.error('================================================================================\n');
+      throw err;
+    } finally {
+      if (conn) conn.release();
     }
   }
+
+  localState.banners = { ...banners };
+  persistLocalBackup();
 
   return true;
 }
@@ -590,8 +742,14 @@ export async function getAdminConfigDB(): Promise<AdminConfigRecord> {
           cards_json: r.cards_json || DEFAULT_ADMIN_CONFIG.cards_json,
         };
       }
-    } catch (err) {
-      console.error('[DB] Erro ao buscar admin_config no MySQL:', err);
+    } catch (err: any) {
+      console.error('\n================================================================================');
+      console.error('❌ [DB CRÍTICO] ERRO AO BUSCAR ADMIN_CONFIG NO BANCO DE DADOS MYSQL:');
+      console.error('================================================================================');
+      console.error('- Mensagem:', err.message);
+      console.error('- Código:', err.code);
+      console.error('- SQL:', err.sqlMessage || 'N/A');
+      console.error('================================================================================\n');
     }
   }
 
@@ -599,11 +757,17 @@ export async function getAdminConfigDB(): Promise<AdminConfigRecord> {
 }
 
 export async function updateAdminConfigDB(partial: Partial<AdminConfigRecord>): Promise<AdminConfigRecord> {
-  localState.admin_config = {
-    ...localState.admin_config,
-    ...partial,
-  };
-  persistLocalBackup();
+  const isEnvConfigured = Boolean(process.env.MYSQL_HOST && process.env.MYSQL_USER);
+
+  if (isEnvConfigured && (!isUsingMySQL || !mysqlPool)) {
+    const errorMsg = `Conexão MySQL inativa no servidor! O arquivo .env possui credenciais, mas o banco falhou ao conectar (${lastConnectionError?.message || 'Servidor offline'}).`;
+    console.error('\n================================================================================');
+    console.error('❌ [DB CRÍTICO] TENTATIVA DE GRAVAR CONFIGURAÇÃO COM BANCO MYSQL DESCONECTADO:');
+    console.error('================================================================================');
+    console.error(errorMsg);
+    console.error('================================================================================\n');
+    throw new Error(errorMsg);
+  }
 
   if (isUsingMySQL && mysqlPool) {
     try {
@@ -665,12 +829,26 @@ export async function updateAdminConfigDB(partial: Partial<AdminConfigRecord>): 
           `UPDATE \`admin_config\` SET ${fields.join(', ')} WHERE \`id\` = ?`,
           values
         );
-        console.log('[DB] admin_config atualizada com sucesso no MySQL!');
+        console.log('✅ [DB] admin_config atualizada com 100% de sucesso no MySQL!');
       }
-    } catch (err) {
-      console.error('[DB] Erro ao atualizar admin_config no MySQL:', err);
+    } catch (err: any) {
+      console.error('\n================================================================================');
+      console.error('❌ [DB CRÍTICO] ERRO AO ATUALIZAR ADMIN_CONFIG NO BANCO DE DADOS MYSQL:');
+      console.error('================================================================================');
+      console.error('- Mensagem:', err.message);
+      console.error('- Código:', err.code);
+      console.error('- SQL:', err.sqlMessage || 'N/A');
+      console.error('- Stack:', err.stack);
+      console.error('================================================================================\n');
+      throw err;
     }
   }
+
+  localState.admin_config = {
+    ...localState.admin_config,
+    ...partial,
+  };
+  persistLocalBackup();
 
   return localState.admin_config;
 }

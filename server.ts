@@ -7,6 +7,7 @@ import { Readable } from 'stream';
 import { DEFAULT_CHANNELS, TestChannel, DEFAULT_SPONSOR_CONFIG, SponsorConfig } from './src/types/channel.ts';
 import {
   initDatabase,
+  getDbConnectionStatus,
   getCanaisDB,
   saveCanaisDB,
   getBannersDB,
@@ -957,6 +958,12 @@ async function startUpstreamChannelStream(
     await handleProxy(channel.streamUrl, res);
   });
 
+  // --- ROTA DE DIAGNÓSTICO DO BANCO DE DADOS MYSQL (/api/db-status) ---
+  app.get('/api/db-status', (_req, res) => {
+    const status = getDbConnectionStatus();
+    res.status(status.isUsingMySQL ? 200 : 503).json(status);
+  });
+
   // --- API DE CANAIS (CRUD DIRETO NO BANCO DE DADOS DEFINITIVO: canais) ---
   app.get('/api/channels', async (_req, res) => {
     try {
@@ -966,37 +973,64 @@ async function startUpstreamChannelStream(
       }
       res.json(channelsStore);
     } catch (err: any) {
-      console.error('[DB] Erro ao consultar canais no banco:', err?.message);
+      console.error('\n❌ [API GET /api/channels] Erro ao carregar canais do MySQL:', err?.message);
       res.json(channelsStore);
     }
   });
 
   app.post('/api/channels', async (req, res) => {
     const newChannels = req.body;
-    if (Array.isArray(newChannels)) {
+    if (!Array.isArray(newChannels)) {
+      return res.status(400).json({ success: false, error: 'Formato de canais inválido. Esperada uma lista de canais.' });
+    }
+
+    try {
+      const canalRecords: CanalRecord[] = newChannels.map(testChannelToCanalRecord);
+
+      // 1. Grava no banco de dados definitivo MySQL/MariaDB
+      // Se houver qualquer falha ou se o MySQL estiver configurado mas desconectado, saveCanaisDB lançará erro
+      await saveCanaisDB(canalRecords);
+
+      // 2. Confirmação de 100% no banco antes de sincronizar memória e disco
       channelsStore = newChannels;
       saveChannelsToDisk(channelsStore);
-      try {
-        const canalRecords: CanalRecord[] = newChannels.map(testChannelToCanalRecord);
-        await saveCanaisDB(canalRecords);
-        console.log(`[DB] ${canalRecords.length} canais gravados no banco de dados com sucesso.`);
-        return res.json({ success: true, count: channelsStore.length, persistedInDB: true });
-      } catch (dbErr: any) {
-        console.error('[DB] Erro ao persistir canais no banco:', dbErr?.message);
-        return res.json({ success: true, count: channelsStore.length, warning: 'Salvo em cache local' });
-      }
+      console.log(`✅ [API POST /api/channels] ${canalRecords.length} canais gravados no banco de dados com 100% de sucesso.`);
+
+      return res.json({ success: true, count: channelsStore.length, persistedInDB: true });
+    } catch (dbErr: any) {
+      console.error('\n================================================================================');
+      console.error('❌ [API POST /api/channels] ERRO FATAL AO SALVAR CANAIS NO BANCO DE DADOS:');
+      console.error('================================================================================');
+      console.error('- Mensagem:', dbErr?.message);
+      console.error('- Código:', dbErr?.code || 'N/A');
+      console.error('- SQL:', dbErr?.sqlMessage || 'N/A');
+      console.error('- Stack:', dbErr?.stack);
+      console.error('================================================================================\n');
+
+      return res.status(500).json({
+        success: false,
+        error: 'Falha ao salvar canais no banco de dados MySQL',
+        details: dbErr?.message || 'Erro de gravação no banco de dados',
+        code: dbErr?.code || 'DB_WRITE_ERROR',
+      });
     }
-    return res.status(400).json({ error: 'Formato de canais inválido' });
   });
 
   app.post('/api/channels/reset', async (_req, res) => {
-    channelsStore = DEFAULT_CHANNELS;
-    saveChannelsToDisk(channelsStore);
     try {
       const defaultRecords = DEFAULT_CHANNELS.map(testChannelToCanalRecord);
       await saveCanaisDB(defaultRecords);
-    } catch (_) {}
-    res.json({ success: true, count: channelsStore.length });
+      channelsStore = DEFAULT_CHANNELS;
+      saveChannelsToDisk(channelsStore);
+      return res.json({ success: true, count: channelsStore.length, persistedInDB: true });
+    } catch (dbErr: any) {
+      console.error('❌ [API POST /api/channels/reset] Erro ao restaurar canais no MySQL:', dbErr?.message);
+      return res.status(500).json({
+        success: false,
+        error: 'Falha ao resetar canais no banco de dados',
+        details: dbErr?.message,
+      });
+    }
   });
 
   // --- API DE BANNERS (CRUD DIRETO NO BANCO DE DADOS DEFINITIVO: banners) ---
@@ -1005,23 +1039,38 @@ async function startUpstreamChannelStream(
       const banners = await getBannersDB();
       res.json(banners);
     } catch (err: any) {
-      console.error('[DB] Erro ao consultar banners:', err?.message);
+      console.error('❌ [API GET /api/banners] Erro ao consultar banners:', err?.message);
       res.status(500).json({ error: 'Erro ao buscar banners no banco de dados' });
     }
   });
 
   app.post('/api/banners', async (req, res) => {
     const banners = req.body;
-    if (banners && typeof banners === 'object') {
-      try {
-        await saveBannersDB(banners);
-        return res.json({ success: true, banners, persistedInDB: true });
-      } catch (err: any) {
-        console.error('[DB] Erro ao persistir banners no banco:', err?.message);
-        return res.status(500).json({ error: 'Erro ao salvar banners no banco de dados' });
-      }
+    if (!banners || typeof banners !== 'object') {
+      return res.status(400).json({ success: false, error: 'Formato de banners inválido' });
     }
-    return res.status(400).json({ error: 'Formato de banners inválido' });
+
+    try {
+      await saveBannersDB(banners);
+      console.log('✅ [API POST /api/banners] Banners gravados no banco de dados com 100% de sucesso.');
+      return res.json({ success: true, banners, persistedInDB: true });
+    } catch (err: any) {
+      console.error('\n================================================================================');
+      console.error('❌ [API POST /api/banners] ERRO FATAL AO SALVAR BANNERS NO BANCO DE DADOS:');
+      console.error('================================================================================');
+      console.error('- Mensagem:', err?.message);
+      console.error('- Código:', err?.code || 'N/A');
+      console.error('- SQL:', err?.sqlMessage || 'N/A');
+      console.error('- Stack:', err?.stack);
+      console.error('================================================================================\n');
+
+      return res.status(500).json({
+        success: false,
+        error: 'Falha ao salvar banners no banco de dados MySQL',
+        details: err?.message || 'Erro de gravação no banco de dados',
+        code: err?.code || 'DB_WRITE_ERROR',
+      });
+    }
   });
 
   // --- API DE ADMIN CONFIG (CRUD DIRETO NO BANCO DE DADOS DEFINITIVO: admin_config) ---
@@ -1029,17 +1078,32 @@ async function startUpstreamChannelStream(
     try {
       const cfg = await getAdminConfigDB();
       res.json(cfg);
-    } catch (err) {
-      res.status(500).json({ error: 'Erro ao carregar admin_config' });
+    } catch (err: any) {
+      console.error('❌ [API GET /api/admin-config] Erro ao carregar admin_config:', err?.message);
+      res.status(500).json({ error: 'Erro ao carregar admin_config do banco de dados' });
     }
   });
 
   app.post('/api/admin-config', async (req, res) => {
     try {
       const updated = await updateAdminConfigDB(req.body || {});
-      res.json({ success: true, config: updated, persistedInDB: true });
-    } catch (err) {
-      res.status(500).json({ error: 'Erro ao atualizar admin_config' });
+      console.log('✅ [API POST /api/admin-config] Configuração gravada no banco de dados com 100% de sucesso.');
+      return res.json({ success: true, config: updated, persistedInDB: true });
+    } catch (err: any) {
+      console.error('\n================================================================================');
+      console.error('❌ [API POST /api/admin-config] ERRO FATAL AO ATUALIZAR CONFIGURAÇÃO NO BANCO:');
+      console.error('================================================================================');
+      console.error('- Mensagem:', err?.message);
+      console.error('- Código:', err?.code || 'N/A');
+      console.error('- SQL:', err?.sqlMessage || 'N/A');
+      console.error('================================================================================\n');
+
+      return res.status(500).json({
+        success: false,
+        error: 'Falha ao atualizar configurações no banco de dados MySQL',
+        details: err?.message || 'Erro de gravação no banco de dados',
+        code: err?.code || 'DB_WRITE_ERROR',
+      });
     }
   });
 
@@ -1086,14 +1150,50 @@ async function startUpstreamChannelStream(
 
       sponsorStore = mergedSponsor;
       res.json(mergedSponsor);
-    } catch (err) {
+    } catch (err: any) {
+      console.error('❌ [API GET /api/sponsor] Erro ao buscar patrocinador:', err?.message);
       res.json(sponsorStore);
     }
   });
 
   app.post('/api/sponsor', async (req, res) => {
     const config = req.body;
-    if (config && typeof config === 'object') {
+    if (!config || typeof config !== 'object') {
+      return res.status(400).json({ success: false, error: 'Configuração inválida' });
+    }
+
+    try {
+      // 1. Grava no banco: configurações gerais do patrocinador
+      await updateAdminConfigDB({
+        tagline: config.tagline,
+        descricao: config.description,
+        inplay_script: config.inPlayScript || '',
+        inplay_initial_delay_seconds: config.inPlayInitialDelaySeconds ?? 30,
+        inplay_interval_minutes: config.inPlayIntervalMinutes ?? 8,
+        inplay_duration_seconds: config.inPlayDurationSeconds ?? 5,
+        cards_json: JSON.stringify(config.cards || []),
+      });
+
+      // 2. Grava no banco: banners
+      if (config.banners && typeof config.banners === 'object') {
+        const bannerRecords: Record<string, BannerRecord> = {};
+        for (const [pos, item] of Object.entries(config.banners as Record<string, any>)) {
+          bannerRecords[pos] = {
+            id: item.id || pos,
+            posicao: pos,
+            tipo_conteudo: item.contentType || 'image',
+            imagem_url: item.imageUrl || '',
+            link_url: item.linkUrl || '',
+            alt_texto: item.altText || '',
+            script_codigo: item.scriptCode || '',
+            tempo_rotacao: item.refreshIntervalSeconds || 60,
+            ativo: item.active ? 1 : 0,
+          };
+        }
+        await saveBannersDB(bannerRecords);
+      }
+
+      // 3. Somente após AMBOS serem confirmados no banco de dados com 100% de sucesso:
       sponsorStore = {
         ...DEFAULT_SPONSOR_CONFIG,
         ...config,
@@ -1101,50 +1201,28 @@ async function startUpstreamChannelStream(
       inPlayScriptStore = sponsorStore.inPlayScript || '';
       saveSponsorToDisk(sponsorStore);
 
-      // Persiste direto nas tabelas admin_config e banners do banco definitivo
-      try {
-        await updateAdminConfigDB({
-          tagline: config.tagline,
-          descricao: config.description,
-          inplay_script: config.inPlayScript || '',
-          inplay_initial_delay_seconds: config.inPlayInitialDelaySeconds ?? 30,
-          inplay_interval_minutes: config.inPlayIntervalMinutes ?? 8,
-          inplay_duration_seconds: config.inPlayDurationSeconds ?? 5,
-          cards_json: JSON.stringify(config.cards || []),
-        });
+      console.log('✅ [API POST /api/sponsor] Patrocinador e Banners gravados no banco de dados com 100% de sucesso.');
+      return res.json({ success: true, config: sponsorStore, persistedInDB: true });
+    } catch (dbErr: any) {
+      console.error('\n================================================================================');
+      console.error('❌ [API POST /api/sponsor] ERRO FATAL AO GRAVAR PATROCINADOR/BANNERS NO BANCO:');
+      console.error('================================================================================');
+      console.error('- Mensagem:', dbErr?.message);
+      console.error('- Código:', dbErr?.code || 'N/A');
+      console.error('- SQL:', dbErr?.sqlMessage || 'N/A');
+      console.error('- Stack:', dbErr?.stack);
+      console.error('================================================================================\n');
 
-        if (config.banners && typeof config.banners === 'object') {
-          const bannerRecords: Record<string, BannerRecord> = {};
-          for (const [pos, item] of Object.entries(config.banners as Record<string, any>)) {
-            bannerRecords[pos] = {
-              id: item.id || pos,
-              posicao: pos,
-              tipo_conteudo: item.contentType || 'image',
-              imagem_url: item.imageUrl || '',
-              link_url: item.linkUrl || '',
-              alt_texto: item.altText || '',
-              script_codigo: item.scriptCode || '',
-              tempo_rotacao: item.refreshIntervalSeconds || 60,
-              ativo: item.active ? 1 : 0,
-            };
-          }
-          await saveBannersDB(bannerRecords);
-        }
-
-        console.log('[DB] Configuração de Patrocinador e Banners gravada no banco com sucesso.');
-        return res.json({ success: true, config: sponsorStore, persistedInDB: true });
-      } catch (dbErr: any) {
-        console.error('[DB] Erro ao gravar sponsor/banners no banco:', dbErr?.message);
-        return res.json({ success: true, config: sponsorStore, warning: 'Salvo localmente' });
-      }
+      return res.status(500).json({
+        success: false,
+        error: 'Falha ao salvar patrocinador e banners no banco de dados MySQL',
+        details: dbErr?.message || 'Erro de gravação no banco de dados',
+        code: dbErr?.code || 'DB_WRITE_ERROR',
+      });
     }
-    return res.status(400).json({ error: 'Configuração inválida' });
   });
 
   app.post('/api/sponsor/reset', async (_req, res) => {
-    sponsorStore = DEFAULT_SPONSOR_CONFIG;
-    inPlayScriptStore = '';
-    saveSponsorToDisk(sponsorStore);
     try {
       await updateAdminConfigDB({
         tagline: DEFAULT_SPONSOR_CONFIG.tagline,
@@ -1155,8 +1233,18 @@ async function startUpstreamChannelStream(
         inplay_duration_seconds: 5,
         cards_json: JSON.stringify(DEFAULT_SPONSOR_CONFIG.cards || []),
       });
-    } catch (_) {}
-    res.json({ success: true, config: sponsorStore });
+      sponsorStore = DEFAULT_SPONSOR_CONFIG;
+      inPlayScriptStore = '';
+      saveSponsorToDisk(sponsorStore);
+      return res.json({ success: true, config: sponsorStore, persistedInDB: true });
+    } catch (err: any) {
+      console.error('❌ [API POST /api/sponsor/reset] Erro ao resetar patrocinador no MySQL:', err?.message);
+      return res.status(500).json({
+        success: false,
+        error: 'Falha ao restaurar patrocinador no banco de dados',
+        details: err?.message,
+      });
+    }
   });
 
   // --- API DE ARMAZENAMENTO DO SCRIPT DE ANÚNCIO IN-PLAY ---
@@ -1171,13 +1259,29 @@ async function startUpstreamChannelStream(
 
   app.post('/api/inplay-script', async (req, res) => {
     const { inPlayScript } = req.body || {};
-    inPlayScriptStore = typeof inPlayScript === 'string' ? inPlayScript : '';
-    sponsorStore.inPlayScript = inPlayScriptStore;
-    saveSponsorToDisk(sponsorStore);
+    const scriptVal = typeof inPlayScript === 'string' ? inPlayScript : '';
     try {
-      await updateAdminConfigDB({ inplay_script: inPlayScriptStore });
-    } catch (_) {}
-    res.json({ success: true, inPlayScript: inPlayScriptStore, persistedInDB: true });
+      await updateAdminConfigDB({ inplay_script: scriptVal });
+      inPlayScriptStore = scriptVal;
+      sponsorStore.inPlayScript = inPlayScriptStore;
+      saveSponsorToDisk(sponsorStore);
+      console.log('✅ [API POST /api/inplay-script] Script in-play gravado no MySQL com 100% de sucesso.');
+      return res.json({ success: true, inPlayScript: inPlayScriptStore, persistedInDB: true });
+    } catch (err: any) {
+      console.error('\n================================================================================');
+      console.error('❌ [API POST /api/inplay-script] ERRO AO GRAVAR SCRIPT IN-PLAY NO MYSQL:');
+      console.error('================================================================================');
+      console.error('- Mensagem:', err?.message);
+      console.error('- Código:', err?.code || 'N/A');
+      console.error('================================================================================\n');
+
+      return res.status(500).json({
+        success: false,
+        error: 'Falha ao salvar script in-play no banco de dados MySQL',
+        details: err?.message || 'Erro de gravação no banco de dados',
+        code: err?.code || 'DB_WRITE_ERROR',
+      });
+    }
   });
 
   // Health check com métricas do Broadcaster
